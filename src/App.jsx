@@ -1,5 +1,13 @@
+// --- START OF FILE App.jsx ---
+
 import React, { useState, useRef } from 'react';
 import { Upload, Download, FileText, CheckCircle, AlertCircle } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import Papa from 'papaparse';
+
+// Importa da utils.js e rules.js
+import { COLUMNS } from './utils'; // COLUMNS è definito in utils.js
+import * as Rules from './rules'; // Importa tutte le funzioni da rules.js
 
 const CSVAnalyzer = () => {
   const [file, setFile] = useState(null);
@@ -9,10 +17,11 @@ const CSVAnalyzer = () => {
   const [processing, setProcessing] = useState(false);
   const [results, setResults] = useState(null);
   const [step, setStep] = useState(1);
+  const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
 
-  // Stili CSS come oggetti JavaScript
-  const styles = {
+  // Stili CSS (invariati)
+  const styles = { /* ... STESSI STILI DI PRIMA ... */
     container: {
       minHeight: '100vh',
       background: 'linear-gradient(135deg, #eff6ff 0%, #e0e7ff 100%)',
@@ -182,7 +191,8 @@ const CSVAnalyzer = () => {
       backgroundColor: 'white',
       border: '1px solid #e5e7eb',
       borderRadius: '6px',
-      overflow: 'hidden'
+      overflow: 'hidden',
+      borderCollapse: 'collapse'
     },
     tableHeader: {
       backgroundColor: '#f9fafb'
@@ -216,260 +226,193 @@ const CSVAnalyzer = () => {
       fontSize: '14px',
       color: '#6b7280',
       marginTop: '8px'
+    },
+    errorBox: { 
+      backgroundColor: '#fee2e2', 
+      color: '#b91c1c', 
+      padding: '16px',
+      borderRadius: '8px',
+      marginBottom: '24px',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px'
     }
   };
 
-  // Funzione per convertire valori numerici italiani in float
-  const parseItalianNumber = (value) => {
-    if (!value || value === '') return 0;
-    const cleanValue = value.toString().replace(',', '.');
-    const parsed = parseFloat(cleanValue);
-    return isNaN(parsed) ? 0 : parsed;
-  };
-
-  // Funzione per formattare numeri in formato italiano
-  const formatItalianNumber = (value) => {
-    if (value === 0) return '0,000';
-    return value.toFixed(3).replace('.', ',');
-  };
-
-  // Funzione per identificare se è un'autovettura
-  const isAutovettura = (uso) => {
-    if (!uso) return false;
-    const autovettureCodes = ['000', '001', '002'];
-    return autovettureCodes.some(code => uso.includes(code));
-  };
-
-  // Funzione per caricare e parsare il file
-  const handleFileUpload = async (event) => {
+  // Funzione per caricare e parsare il file con PapaParse (invariata)
+  const handleFileUpload = (event) => {
     const selectedFile = event.target.files[0];
     if (!selectedFile) return;
 
     setFile(selectedFile);
     setProcessing(true);
+    setError(null);
     setStep(1);
 
-    try {
-      const text = await selectedFile.text();
-      const lines = text.split('\n').filter(line => line.trim());
-      const headerLine = lines[0];
-      const dataLines = lines.slice(1);
-      
-      // Parse headers
-      const parsedHeaders = headerLine.split(';').map(h => h.replace(/"/g, '').trim());
-      
-      // Parse data
-      const parsedData = dataLines.map(line => {
-        const values = [];
-        let current = '';
-        let inQuotes = false;
-        
-        for (let i = 0; i < line.length; i++) {
-          const char = line[i];
-          if (char === '"') {
-            inQuotes = !inQuotes;
-          } else if (char === ';' && !inQuotes) {
-            values.push(current.trim());
-            current = '';
-          } else {
-            current += char;
-          }
+    Papa.parse(selectedFile, {
+      header: true,
+      skipEmptyLines: true,
+      delimiter: ";",
+      transformHeader: header => header.replace(/"/g, '').trim(),
+      complete: (results) => {
+        if (results.errors.length) {
+          const errorMessages = results.errors.map(e => `${e.message} (riga: ${e.row + 2})`).join("; ");
+          console.error('Error parsing CSV with PapaParse:', results.errors);
+          setError(`Errore nel parsing del CSV: ${errorMessages}`);
+          setProcessing(false);
+          setFile(null);
+          if (fileInputRef.current) fileInputRef.current.value = '';
+          return;
         }
-        values.push(current.trim());
         
-        const row = {};
-        parsedHeaders.forEach((header, index) => {
-          row[header] = values[index] || '';
-        });
-        return row;
-      });
+        const parsedData = results.data;
+        const parsedHeaders = results.meta.fields || (parsedData.length > 0 ? Object.keys(parsedData[0]) : []);
 
-      setHeaders(parsedHeaders);
-      setOriginalData(parsedData);
-      setStep(2);
-      
-    } catch (error) {
-      console.error('Errore nel parsing del file:', error);
-      alert('Errore nel caricamento del file: ' + error.message);
-    }
-    
-    setProcessing(false);
+        setHeaders(parsedHeaders);
+        setOriginalData(parsedData);
+        setStep(2);
+        setProcessing(false);
+      },
+      error: (error) => {
+        console.error('Errore nel caricamento del file:', error);
+        setError(`Errore nel caricamento del file: ${error.message}`);
+        setProcessing(false);
+        setFile(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    });
   };
-
+  
   // Funzione principale di processamento
   const processData = async () => {
     if (!originalData.length) return;
     
     setProcessing(true);
-    let currentData = [...originalData];
+    setError(null);
+    // Crea una deep copy per evitare mutazioni accidentali dei dati originali
+    // e per assicurare che ogni regola operi su una copia fresca se necessario.
+    let currentProcessedData = JSON.parse(JSON.stringify(originalData)); 
+    let currentHeadersState = [...headers]; // Usa lo stato degli header per il primo step
     const transformationLog = [];
 
     try {
-      // STEP 1: Elimina righe infrannuali
-      const initialCount = currentData.length;
-      currentData = currentData.filter(row => {
-        const ricorrenza = row['Ricorrenza'] || '';
-        return !ricorrenza.toLowerCase().includes('infrannuale');
-      });
-      transformationLog.push(`Step 1: Eliminate ${initialCount - currentData.length} righe infrannuali`);
+      let stepResult;
 
-      // STEP 2: Rimuovi duplicati
-      const beforeDuplicates = currentData.length;
-      const uniqueData = [];
-      const seen = new Set();
+      // Applica le regole importate
+      stepResult = Rules.step1_filterInfrannuali(currentProcessedData);
+      currentProcessedData = stepResult.newData;
+      transformationLog.push(stepResult.log);
+
+      stepResult = Rules.step2_removeDuplicates(currentProcessedData);
+      currentProcessedData = stepResult.newData;
+      transformationLog.push(stepResult.log);
+
+      stepResult = Rules.step3_addNewColumns(currentProcessedData, currentHeadersState);
+      currentProcessedData = stepResult.newData;
+      currentHeadersState = stepResult.newHeaders; // Aggiorna gli header locali
+      transformationLog.push(stepResult.log);
       
-      currentData.forEach(row => {
-        const key = JSON.stringify(row);
-        if (!seen.has(key)) {
-          seen.add(key);
-          uniqueData.push(row);
-        }
-      });
-      currentData = uniqueData;
-      transformationLog.push(`Step 2: Rimosse ${beforeDuplicates - currentData.length} righe duplicate`);
+      stepResult = Rules.step4_setPremioDesideratoLowScostamento(currentProcessedData);
+      currentProcessedData = stepResult.newData;
+      transformationLog.push(stepResult.log);
 
-      // STEP 3: Aggiungi nuove colonne dopo BF
-      const newHeaders = [...headers];
-      const bfIndex = newHeaders.findIndex(h => h === '% Scostamento');
-      if (bfIndex !== -1) {
-        newHeaders.splice(bfIndex + 1, 0, 'premio desiderato', 'sconti da fare');
-        currentData = currentData.map(row => ({
-          ...row,
-          'premio desiderato': '',
-          'sconti da fare': ''
-        }));
-      }
-      transformationLog.push(`Step 3: Aggiunte nuove colonne`);
+      stepResult = Rules.step5_setTargaEffetto(currentProcessedData);
+      currentProcessedData = stepResult.newData;
+      transformationLog.push(stepResult.log);
+      
+      stepResult = Rules.step6_distributeScontiCompagnie(currentProcessedData);
+      currentProcessedData = stepResult.newData;
+      transformationLog.push(stepResult.log);
+      
+      stepResult = Rules.step7_redistributeRossiDurante(currentProcessedData);
+      currentProcessedData = stepResult.newData;
+      transformationLog.push(stepResult.log);
 
-      // STEP 4: Logica per BG (premio desiderato)
-      let step4Count = 0;
-      currentData = currentData.map(row => {
-        const be = parseItalianNumber(row['Scostamento']);
-        const bc = parseItalianNumber(row['Lordo Attuale']);
-        
-        if (be <= 20) {
-          row['premio desiderato'] = formatItalianNumber(bc);
-          step4Count++;
-        }
-        return row;
-      });
-      transformationLog.push(`Step 4: Impostato premio desiderato per ${step4Count} righe (BE <= 20)`);
-
-      // STEP 5: Logica per colonna A (TARGA EFFETTO)
-      let step5Count = 0;
-      currentData = currentData.map(row => {
-        const agenzia = row['Agenzia'] || '';
-        const be = parseItalianNumber(row['Scostamento']);
-        
-        if (agenzia.includes('AXA ASSICURAZIONI') || be >= 150) {
-          row['Tipo azione'] = 'TARGA EFFETTO';
-          step5Count++;
-        }
-        return row;
-      });
-      transformationLog.push(`Step 5: Impostato TARGA EFFETTO per ${step5Count} righe`);
-
-      // STEP 6: Distribuzione sconti per compagnie
-      const companySconti = {
-        'ALLIANZ NEXT S.P.A.': { total: 150, autovetture: 100, altri: 50 },
-        'ITALIANA ASSICURAZIONI (AVE)': { total: 1000, autovetture: 800, altri: 200 },
-        'HDI': { total: 500, autovetture: 400, altri: 100 },
-        'HELVETIA': { total: 750, autovetture: 500, altri: 250 }
-      };
-
-      Object.entries(companySconti).forEach(([companyName, sconti]) => {
-        const companyRows = currentData.filter(row => 
-          row['Tipo azione'] !== 'TARGA EFFETTO' && 
-          row['Agenzia'] && 
-          row['Agenzia'].includes(companyName)
-        );
-
-        const autovetture = companyRows.filter(row => isAutovettura(row['Uso']));
-        const altri = companyRows.filter(row => !isAutovettura(row['Uso']));
-
-        if (autovetture.length > 0) {
-          const scontoPerAuto = sconti.autovetture / autovetture.length;
-          autovetture.forEach(row => {
-            const bc = parseItalianNumber(row['Lordo Attuale']);
-            const newValue = Math.max(0, bc - scontoPerAuto);
-            row['premio desiderato'] = formatItalianNumber(newValue);
-            row['sconti da fare'] = formatItalianNumber(scontoPerAuto);
-          });
-        }
-
-        if (altri.length > 0) {
-          const scontoPerAltro = sconti.altri / altri.length;
-          altri.forEach(row => {
-            const bc = parseItalianNumber(row['Lordo Attuale']);
-            const newValue = Math.max(0, bc - scontoPerAltro);
-            row['premio desiderato'] = formatItalianNumber(newValue);
-            row['sconti da fare'] = formatItalianNumber(scontoPerAltro);
-          });
-        }
-      });
-      transformationLog.push(`Step 6: Applicati sconti per compagnie`);
-
-      // STEP 7: Redistribuzione per ROSSI TERESINA e DURANTE LUCA
-      const specialRows = currentData.filter(row => {
-        const produttore = row['Gruppo Produttore'] || '';
-        return produttore.includes('ROSSI TERESINA') || produttore.includes('DURANTE LUCA');
-      });
-
-      specialRows.forEach(row => {
-        const bd = parseItalianNumber(row['Lordo Precedente']);
-        const currentPremio = parseItalianNumber(row['premio desiderato']) || parseItalianNumber(row['Lordo Attuale']);
-        const maxAllowed = bd + 15;
-        
-        if (currentPremio > maxAllowed) {
-          row['premio desiderato'] = formatItalianNumber(maxAllowed);
-          const sconto = parseItalianNumber(row['Lordo Attuale']) - maxAllowed;
-          row['sconti da fare'] = formatItalianNumber(sconto);
-        }
-      });
-      transformationLog.push(`Step 7: Redistribuzione per ${specialRows.length} righe speciali`);
-
-      setHeaders(newHeaders);
-      setProcessedData(currentData);
+      setHeaders(currentHeadersState); // Aggiorna lo stato globale degli header
+      setProcessedData(currentProcessedData);
       setResults({
         originalRows: originalData.length,
-        processedRows: currentData.length,
+        processedRows: currentProcessedData.length,
         transformations: transformationLog
       });
       setStep(3);
       
-    } catch (error) {
-      console.error('Errore nel processamento:', error);
-      alert('Errore nel processamento: ' + error.message);
+    } catch (e) {
+      console.error('Errore nel processamento:', e);
+      setError(`Errore nel processamento: ${e.message}`);
     }
     
     setProcessing(false);
   };
 
-  // Funzione per scaricare il file processato
+  // Funzione per scaricare il file processato come Excel (invariata)
   const downloadProcessedFile = () => {
-    if (!processedData.length) return;
+    if (!processedData.length || !results) {
+        setError("Nessun dato processato da scaricare o risultati mancanti.");
+        return;
+    }
 
-    const csvHeaders = headers.join(';');
-    const csvRows = processedData.map(row => 
-      headers.map(header => {
-        const value = row[header] || '';
-        return `"${value}"`;
-      }).join(';')
-    );
-    
-    const csvContent = [csvHeaders, ...csvRows].join('\n');
-    
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', 'output_processed.csv');
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      const workbook = XLSX.utils.book_new();
+      
+      const excelData = [
+        headers, 
+        ...processedData.map(row => 
+          headers.map(header => row[header] === null || row[header] === undefined ? '' : row[header])
+        )
+      ];
+      
+      const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+      
+      const colWidths = headers.map(header => ({
+        wch: Math.max(String(header).length, 15) 
+      }));
+      worksheet['!cols'] = colWidths;
+      
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Dati Processati');
+      
+      const statsData = [
+        ['Statistiche Processamento'],
+        [''],
+        ['Righe originali', results.originalRows],
+        ['Righe processate', results.processedRows],
+        ['Righe elaborate/eliminate', results.originalRows - results.processedRows],
+        [''],
+        ['Log Trasformazioni'],
+        ...results.transformations.map(log => [log])
+      ];
+      
+      const statsWorksheet = XLSX.utils.aoa_to_sheet(statsData);
+      statsWorksheet['!cols'] = [{wch: 30}, {wch: 15}]; 
+      XLSX.utils.book_append_sheet(workbook, statsWorksheet, 'Statistiche');
+      
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      const filename = `output_${timestamp}.xlsx`;
+      
+      XLSX.writeFile(workbook, filename);
+      console.log(`File Excel generato: ${filename}`);
+      
+    } catch (e) {
+      console.error('Errore nella generazione del file Excel:', e);
+      setError(`Errore nella generazione del file Excel: ${e.message}`);
+    }
   };
 
+  const resetAll = () => {
+    setStep(1);
+    setFile(null);
+    setOriginalData([]);
+    setProcessedData([]);
+    setHeaders([]);
+    setResults(null);
+    setError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // JSX (invariato, tranne per l'import di COLUMNS se usato direttamente nel JSX,
+  // ma in questo caso non sembra essere necessario)
   return (
     <div style={styles.container}>
       <div style={styles.mainCard}>
@@ -478,11 +421,17 @@ const CSVAnalyzer = () => {
             CSV/Excel Analyzer
           </h1>
           <p style={styles.subtitle}>
-            Trasformatore automatico per dati assicurativi
+            Trasformatore automatico per dati assicurativi - Output Excel
           </p>
         </div>
 
-        {/* Progress Steps */}
+        {error && (
+          <div style={styles.errorBox}>
+            <AlertCircle size={24} />
+            <span>{error}</span>
+          </div>
+        )}
+
         <div style={styles.progressContainer}>
           <div style={styles.progressSteps}>
             {[1, 2, 3].map((num) => (
@@ -496,7 +445,6 @@ const CSVAnalyzer = () => {
           </div>
         </div>
 
-        {/* Step 1: Upload */}
         {step === 1 && (
           <div style={styles.uploadArea}>
             <div style={styles.uploadBox}>
@@ -507,7 +455,7 @@ const CSVAnalyzer = () => {
                 Carica il file CSV
               </h3>
               <p style={styles.uploadSubtitle}>
-                Seleziona il file CSV da processare
+                Seleziona il file CSV da processare (delimitato da ';', output: Excel .xlsx)
               </p>
               <input
                 ref={fileInputRef}
@@ -530,7 +478,6 @@ const CSVAnalyzer = () => {
           </div>
         )}
 
-        {/* Step 2: Process */}
         {step === 2 && (
           <div style={styles.uploadArea}>
             <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '16px' }}>
@@ -540,22 +487,30 @@ const CSVAnalyzer = () => {
               File caricato con successo
             </h3>
             <p style={styles.uploadSubtitle}>
-              {originalData.length} righe caricate con {headers.length} colonne
+              {originalData.length} righe caricate con {headers.length} colonne.
             </p>
-            <button
-              onClick={processData}
-              disabled={processing}
-              style={{
-                ...styles.button('success'),
-                ...(processing ? styles.buttonDisabled : {})
-              }}
-            >
-              {processing ? 'Processamento...' : 'Inizia Processamento'}
-            </button>
+            <div style={styles.buttonGroup}>
+                <button
+                onClick={processData}
+                disabled={processing || originalData.length === 0}
+                style={{
+                    ...styles.button('success'),
+                    ...((processing || originalData.length === 0) ? styles.buttonDisabled : {})
+                }}
+                >
+                {processing ? 'Processamento...' : 'Inizia Processamento'}
+                </button>
+                <button
+                    onClick={resetAll}
+                    style={styles.button('gray')}
+                    disabled={processing}
+                >
+                    Annulla e Carica Nuovo File
+                </button>
+            </div>
           </div>
         )}
 
-        {/* Step 3: Results */}
         {step === 3 && results && (
           <div>
             <div style={styles.resultsCard}>
@@ -594,26 +549,20 @@ const CSVAnalyzer = () => {
               <button
                 onClick={downloadProcessedFile}
                 style={styles.button('primary')}
+                disabled={processedData.length === 0}
               >
                 <Download size={20} />
-                Scarica CSV Processato
+                Scarica Excel Processato
               </button>
               <button
-                onClick={() => {
-                  setStep(1);
-                  setFile(null);
-                  setOriginalData([]);
-                  setProcessedData([]);
-                  setResults(null);
-                }}
+                onClick={resetAll}
                 style={styles.button('gray')}
               >
                 Nuovo File
               </button>
             </div>
 
-            {/* Preview dei dati processati */}
-            {processedData.length > 0 && (
+            {processedData.length > 0 && headers.length > 0 && (
               <div>
                 <h4 style={styles.previewTitle}>
                   Preview Dati Processati (prime 5 righe)
@@ -624,7 +573,7 @@ const CSVAnalyzer = () => {
                       <tr>
                         {headers.slice(0, 10).map((header, index) => (
                           <th key={index} style={styles.tableHeaderCell}>
-                            {header}
+                            {String(header)}
                           </th>
                         ))}
                       </tr>
@@ -634,7 +583,7 @@ const CSVAnalyzer = () => {
                         <tr key={rowIndex} style={rowIndex % 2 === 0 ? {} : styles.tableRowEven}>
                           {headers.slice(0, 10).map((header, colIndex) => (
                             <td key={colIndex} style={styles.tableCell}>
-                              {row[header] || ''}
+                              {row[header] === null || row[header] === undefined ? '' : String(row[header])}
                             </td>
                           ))}
                         </tr>
@@ -643,7 +592,7 @@ const CSVAnalyzer = () => {
                   </table>
                 </div>
                 <p style={styles.previewNote}>
-                  Mostrando le prime 10 colonne di {headers.length} totali
+                  Mostrando le prime {Math.min(10, headers.length)} colonne di {headers.length} totali.
                 </p>
               </div>
             )}
@@ -659,3 +608,5 @@ function App() {
 }
 
 export default App;
+
+// --- END OF FILE App.jsx ---
